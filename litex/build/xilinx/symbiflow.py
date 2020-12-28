@@ -25,6 +25,25 @@ from litex.build.xilinx import common
 def _unwrap(value):
     return value.value if isinstance(value, Constant) else value
 
+def _build_sdc(named_pc):
+    return "\n".join(named_pc) if named_pc else ""
+
+def _build_pcf(named_sc):
+    r = ""
+    current_resname = ""
+    for sig, pins, _, resname in named_sc:
+        if current_resname != resname[0]:
+            if current_resname:
+                r += "\n"
+            current_resname = resname[0]
+            r += f"# {current_resname}\n"
+        if len(pins) > 1:
+            for i, p in enumerate(pins):
+                r += f"set_io {sig}[{i}] {Pins(p).identifiers[0]}\n"
+        elif pins:
+            r += f"set_io {sig} {Pins(pins[0]).identifiers[0]}\n"
+    return r
+
 # Makefile -----------------------------------------------------------------------------------------
 
 class _MakefileGenerator:
@@ -139,6 +158,7 @@ class SymbiflowToolchain:
             "",
             Var("VERILOG", [f for f,language,_ in platform.sources if language in ["verilog", "system_verilog"]]),
             Var("MEM_INIT", [f"{name}" for name in os.listdir() if name.endswith(".init")]),
+            Var("PCF", f"{build_name}.pcf"),
             Var("SDC", f"{build_name}.sdc"),
             Var("XDC", f"{build_name}.xdc"),
             Var("ARTIFACTS", [
@@ -150,15 +170,15 @@ class SymbiflowToolchain:
 
             Rule("all", ["$(TOP).bit"], phony=True),
             Rule("$(TOP).eblif", ["$(VERILOG)", "$(MEM_INIT)", "$(XDC)"], commands=[
-                    "symbiflow_synth -t $(TOP) -v $(VERILOG) -d $(BITSTREAM_DEVICE) -p $(PARTNAME) -x $(XDC) > /dev/null"
+                "symbiflow_synth -t $(TOP) -v $(VERILOG) -d $(BITSTREAM_DEVICE) -p $(PARTNAME) -x $(XDC) > /dev/null"
                 ]),
             Rule("$(TOP).net", ["$(TOP).eblif", "$(SDC)"], commands=[
                     "symbiflow_pack -e $(TOP).eblif -d $(DEVICE) -s $(SDC) > /dev/null"
                 ]),
-            Rule("$(TOP).place", ["$(TOP).net"], commands=[
-                    "symbiflow_place -e $(TOP).eblif -d $(DEVICE) -n $(TOP).net -P $(PARTNAME) -s $(SDC) > /dev/null"
+            Rule("$(TOP).place", ["$(TOP).net", "$(PCF)"], commands=[
+                    "symbiflow_place -e $(TOP).eblif -d $(DEVICE) -n $(TOP).net -P $(PARTNAME) -s $(SDC) -p $(PCF) > /dev/null"
                 ]),
-            Rule("$(TOP).route", ["$(TOP).place"], commands=[
+            Rule("$(TOP).route", ["$(TOP).place", "$(SDC)"], commands=[
                     "symbiflow_route -e $(TOP).eblif -d $(DEVICE) -s $(SDC) > /dev/null"
                 ]),
             Rule("$(TOP).fasm", ["$(TOP).route"], commands=[
@@ -223,8 +243,30 @@ class SymbiflowToolchain:
             build_name = build_name
         )
 
+        sdc_commands = [
+            "create_clock",
+            "set_clock_groups",
+            "set_false_path",
+            "set_max_delay", "set_min_delay",
+            "set_multicycle_path",
+            "set_input_delay", "set_output_delay",
+            "set_clock_uncertainty",
+            "set_clock_latency",
+            "set_disable_timing"
+        ]
+        named_pc_xdc = []
+        named_pc_sdc = []
+        for pc in named_pc:
+            cmd = pc.split(maxsplit=1)[0]
+            if cmd in sdc_commands:
+                named_pc_sdc.append(pc)
+            else:
+                named_pc_xdc.append(pc)
+
         # Generate design constraints
-        tools.write_to_file(build_name + ".xdc", _build_xdc(named_sc, named_pc))
+        tools.write_to_file(build_name + ".xdc", _build_xdc(named_sc, named_pc_xdc))
+        tools.write_to_file(build_name + ".pcf", _build_pcf(named_sc))
+        tools.write_to_file(build_name + ".sdc", _build_sdc(named_pc_sdc))
 
         if run:
             _run_make()
